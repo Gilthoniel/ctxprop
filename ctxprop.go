@@ -95,15 +95,20 @@ func (e engine) do() {
 
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				e.checkInstruction(instr)
+				e.checkInstruction(block, instr)
 			}
 		}
 	}
 }
 
-func (e engine) checkInstruction(instr ssa.Instruction) {
+func (e engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) {
 	call, ok := instr.(*ssa.Call)
 	if !ok {
+		return
+	}
+
+	parentCtxVar := e.extractParentContextVariable(block)
+	if parentCtxVar == nil {
 		return
 	}
 
@@ -111,14 +116,48 @@ func (e engine) checkInstruction(instr ssa.Instruction) {
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
-		switch arg.(type) {
-		case *ssa.Parameter:
-			// TODO: check it is the parent context.
-			continue
-		default:
-			// TODO: send diagnostic
+		if !e.checkIfInheritParentCtx(arg, parentCtxVar) {
+			e.report(analysis.Diagnostic{
+				Pos:     instr.Pos(),
+				Message: "function must inherit the context from the parent",
+			})
 		}
 	}
+}
+
+func (e engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Object) bool {
+	// At this point we know that the argument implements <context.Context>
+	// so we need to verify if it inherits from the parent context.
+	switch a := arg.(type) {
+	case *ssa.Parameter:
+		return areIdenticalVariable(a.Object(), parentCtxVar)
+
+	case *ssa.MakeInterface:
+		return e.checkIfInheritParentCtx(a.X, parentCtxVar)
+
+	case *ssa.Call:
+		for _, arg := range a.Call.Args {
+			if e.checkIfInheritParentCtx(arg, parentCtxVar) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e engine) extractParentContextVariable(block *ssa.BasicBlock) types.Object {
+	parent := block.Parent()
+	if parent == nil {
+		return nil
+	}
+
+	for _, param := range parent.Params {
+		if e.isContextImpl(param.Type()) {
+			return param.Object()
+		}
+	}
+
+	return nil
 }
 
 func (e engine) hasContextAsFirstParam(fn *ssa.Function) bool {
@@ -130,4 +169,10 @@ func (e engine) hasContextAsFirstParam(fn *ssa.Function) bool {
 
 func (e engine) isContextImpl(t types.Type) bool {
 	return types.Implements(t, e.ctxIface)
+}
+
+func areIdenticalVariable(a, b types.Object) bool {
+	aVar, aOk := a.(*types.Var)
+	bVar, bOk := b.(*types.Var)
+	return aOk && bOk && aVar == bVar
 }
