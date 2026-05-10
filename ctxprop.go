@@ -1,6 +1,7 @@
 package ctxprop
 
 import (
+	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
@@ -24,9 +25,8 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	e := engine{
-		ssa:      ssa,
-		ctxIface: findContextInterface(ssa),
-		report:   pass.Report,
+		ssa:    ssa,
+		report: pass.Report,
 	}
 
 	e.do()
@@ -46,22 +46,44 @@ func findSSA(pass *analysis.Pass) *buildssa.SSA {
 	return typedSSA
 }
 
-func findContextInterface(ssa *buildssa.SSA) *types.Interface {
-	if ssa == nil || ssa.Pkg == nil || ssa.Pkg.Prog == nil {
-		return nil
-	}
+type engine struct {
+	ssa              *buildssa.SSA
+	ctxIface         *types.Interface
+	ctxProviderIFace *types.Interface
+	report           func(analysis.Diagnostic)
+}
 
-	pkg := ssa.Pkg.Prog.ImportedPackage("context")
+func (e *engine) init() {
+	e.initCtxInterfaces()
+}
+
+func (e *engine) initCtxInterfaces() {
+	if e.ssa == nil || e.ssa.Pkg == nil || e.ssa.Pkg.Prog == nil {
+		return
+	}
+	pkg := e.ssa.Pkg.Prog.ImportedPackage("context")
 	if pkg == nil {
-		return nil
+		return
 	}
-
 	ctxType := pkg.Type("Context")
 	if ctxType == nil {
-		return nil
+		return
 	}
 
-	return findInterfaceType(ctxType.Type())
+	e.ctxIface = findInterfaceType(ctxType.Type())
+
+	methods := []*types.Func{
+		types.NewFunc(token.NoPos, nil, "Context", types.NewSignatureType(
+			nil,
+			nil,
+			nil,
+			types.NewTuple(),
+			types.NewTuple(types.NewVar(token.NoPos, ctxType.Package().Pkg, "", ctxType.Type())),
+			false,
+		)),
+	}
+	e.ctxProviderIFace = types.NewInterfaceType(methods, nil)
+	e.ctxProviderIFace.Complete()
 }
 
 func findInterfaceType(t types.Type) *types.Interface {
@@ -74,14 +96,10 @@ func findInterfaceType(t types.Type) *types.Interface {
 	return nil
 }
 
-type engine struct {
-	ssa      *buildssa.SSA
-	ctxIface *types.Interface
-	report   func(analysis.Diagnostic)
-}
+func (e *engine) do() {
+	e.init()
 
-func (e engine) do() {
-	if e.ssa == nil || e.ctxIface == nil {
+	if e.ctxIface == nil || e.ctxProviderIFace == nil {
 		return
 	}
 
@@ -89,19 +107,51 @@ func (e engine) do() {
 		if fn == nil {
 			continue
 		}
-		if !e.hasContextAsFirstParam(fn) {
-			continue
+
+		switch e.hasContextInParams(fn) {
+		case originVariable:
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					e.checkInstruction(block, instr)
+				}
+			}
+
+		case originProvider:
+			for _, block := range fn.Blocks {
+				for _, instr := range block.Instrs {
+					e.checkInstructionForProvider(block, instr)
+				}
+			}
+
+		case originNone:
 		}
 
-		for _, block := range fn.Blocks {
-			for _, instr := range block.Instrs {
-				e.checkInstruction(block, instr)
-			}
-		}
 	}
 }
 
-func (e engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) {
+func (e *engine) hasContextInParams(fn *ssa.Function) origin {
+	for _, param := range fn.Params {
+		if e.isContextImpl(param.Type()) {
+			return originVariable
+		}
+		if e.isContextProvider(param.Type()) {
+			return originProvider
+		}
+	}
+	return originNone
+}
+
+// origin indicates if the parent context is provided from a variable or from a
+// provider.
+type origin int
+
+const (
+	originNone = iota
+	originVariable
+	originProvider
+)
+
+func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) {
 	call, ok := instr.(*ssa.Call)
 	if !ok {
 		return
@@ -125,7 +175,7 @@ func (e engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) {
 	}
 }
 
-func (e engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Object) bool {
+func (e *engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Object) bool {
 	// At this point we know that the argument implements <context.Context>
 	// so we need to verify if it inherits from the parent context.
 	switch a := arg.(type) {
@@ -145,7 +195,7 @@ func (e engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Object
 	return false
 }
 
-func (e engine) extractParentContextVariable(block *ssa.BasicBlock) types.Object {
+func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) types.Object {
 	parent := block.Parent()
 	if parent == nil {
 		return nil
@@ -160,15 +210,79 @@ func (e engine) extractParentContextVariable(block *ssa.BasicBlock) types.Object
 	return nil
 }
 
-func (e engine) hasContextAsFirstParam(fn *ssa.Function) bool {
-	if len(fn.Params) == 0 {
-		return false
+func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.Instruction) {
+	call, ok := instr.(*ssa.Call)
+	if !ok {
+		return
 	}
-	return e.isContextImpl(fn.Params[0].Type())
+
+	parentCtxProvider := e.extractParentContextProvider(block)
+	if parentCtxProvider == nil {
+		return
+	}
+
+	for _, arg := range call.Call.Args {
+		if !e.isContextImpl(arg.Type()) {
+			continue
+		}
+		if !e.checkIfCtxProvided(arg, parentCtxProvider) {
+			e.report(analysis.Diagnostic{
+				Pos:     instr.Pos(),
+				Message: "function must inherit the context from the parent",
+			})
+		}
+	}
 }
 
-func (e engine) isContextImpl(t types.Type) bool {
+func (e *engine) extractParentContextProvider(block *ssa.BasicBlock) types.Object {
+	parent := block.Parent()
+	if parent == nil {
+		return nil
+	}
+
+	for _, param := range parent.Params {
+		if e.isContextProvider(param.Type()) {
+			return param.Object()
+		}
+	}
+
+	return nil
+}
+
+func (e *engine) checkIfCtxProvided(arg ssa.Value, parentCtxProvider types.Object) bool {
+	switch a := arg.(type) {
+	case *ssa.Call:
+		for _, arg := range a.Call.Args {
+			switch typedArg := arg.(type) {
+			case *ssa.Parameter:
+				if !areIdenticalVariable(typedArg.Object(), parentCtxProvider) {
+					return false
+				}
+
+				return types.Identical(e.ctxProviderIFace.Method(0).Signature(), a.Call.Signature())
+
+			default:
+				return e.checkIfCtxProvided(arg, parentCtxProvider)
+			}
+		}
+
+		return false
+
+	case *ssa.MakeInterface:
+		return e.checkIfCtxProvided(a.X, parentCtxProvider)
+
+	case *ssa.Extract:
+		return e.checkIfCtxProvided(a.Tuple, parentCtxProvider)
+	}
+	return false
+}
+
+func (e *engine) isContextImpl(t types.Type) bool {
 	return types.Implements(t, e.ctxIface)
+}
+
+func (e *engine) isContextProvider(t types.Type) bool {
+	return types.Implements(t, e.ctxProviderIFace)
 }
 
 func areIdenticalVariable(a, b types.Object) bool {

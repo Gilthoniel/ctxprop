@@ -13,3 +13,9 @@ func Test(t *testing.T) {
 	result := analysistest.Run(t, testdata, ctxprop.Analyzer, "a")
 	require.Len(t, result, 1)
 }
+
+func TestHttpHandler(t *testing.T) {
+	testdata := analysistest.TestData()
+	result := analysistest.Run(t, testdata, ctxprop.Analyzer, "b")
+	require.Len(t, result, 1)
+}
