@@ -19,6 +19,14 @@ func serve() {
 	})
 }
 
+func addHandler(ctx context.Context) {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Here we expect the context from the request.
+		foo(r.Context())
+		foo(ctx) // want `function must inherit the context from the parent`
+	})
+}
+
 func foo(ctx context.Context) error {
 	return ctx.Err()
 }

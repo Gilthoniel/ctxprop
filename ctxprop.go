@@ -170,6 +170,10 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 			e.report(analysis.Diagnostic{
 				Pos:     instr.Pos(),
 				Message: "function must inherit the context from the parent",
+				Related: []analysis.RelatedInformation{{
+					Pos:     arg.Pos(),
+					Message: "Use " + parentCtxVar.Name() + " instead",
+				}},
 			})
 		}
 	}
@@ -229,6 +233,10 @@ func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.In
 			e.report(analysis.Diagnostic{
 				Pos:     instr.Pos(),
 				Message: "function must inherit the context from the parent",
+				Related: []analysis.RelatedInformation{{
+					Pos:     parentCtxProvider.Pos(),
+					Message: "Use " + parentCtxProvider.Name() + ".Context() instead",
+				}},
 			})
 		}
 	}
