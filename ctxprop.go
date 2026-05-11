@@ -173,7 +173,7 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		return
 	}
 
-	for _, arg := range call.Call.Args {
+	for _, arg := range dropCallReceiver(call) {
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
@@ -188,6 +188,21 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 			})
 		}
 	}
+}
+
+// dropCallReceiver returns call.Call.Args with the implicit receiver dropped for
+// static method calls. We must not treat that slot as a propagation candidate —
+// for the same reason dropFuncReceiver excludes the parent function's receiver.
+func dropCallReceiver(call *ssa.Call) []ssa.Value {
+	args := call.Call.Args
+	callee := call.Call.StaticCallee()
+	if callee == nil || callee.Signature == nil || callee.Signature.Recv() == nil {
+		return args
+	}
+	if len(args) == 0 {
+		return args
+	}
+	return args[1:]
 }
 
 func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates, stack []ssa.Value) bool {
@@ -299,7 +314,7 @@ func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.In
 		return
 	}
 
-	for _, arg := range call.Call.Args {
+	for _, arg := range dropCallReceiver(call) {
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
