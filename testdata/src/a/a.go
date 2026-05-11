@@ -164,3 +164,42 @@ func _(ctx context.Context) error {
 	m := map[string]any{"k": ctx}
 	return bar(m["k"].(context.Context)) // want `function must inherit the context from the parent`
 }
+
+// ssa.FreeVar: closure captures the parent ctx and propagates it.
+func _(ctx context.Context) error {
+	go func() {
+		_ = bar(ctx)
+	}()
+	return nil
+}
+
+// ssa.FreeVar: closure captures the parent ctx but also issues a call with
+// a fresh context — the bad call must be flagged.
+func _(ctx context.Context) error {
+	go func() {
+		_ = bar(ctx)
+		_ = bar(context.Background()) // want `function must inherit the context from the parent`
+	}()
+	return nil
+}
+
+// Closure does not capture ctx; outer ctx is still in scope and the call
+// with a fresh context must be flagged.
+func _(ctx context.Context) error {
+	go func() {
+		_ = bar(context.Background()) // want `function must inherit the context from the parent`
+	}()
+	return nil
+}
+
+// Nested closure: inner closure propagates ctx through the middle closure's
+// FreeVar capture.
+func _(ctx context.Context) error {
+	func() {
+		func() {
+			_ = bar(ctx)
+			_ = bar(context.Background()) // want `function must inherit the context from the parent`
+		}()
+	}()
+	return nil
+}

@@ -109,7 +109,7 @@ func (e *engine) do() {
 			continue
 		}
 
-		switch e.hasContextInParams(fn) {
+		switch e.hasContextInScope(fn) {
 		case originVariable:
 			for _, block := range fn.Blocks {
 				for _, instr := range block.Instrs {
@@ -128,6 +128,25 @@ func (e *engine) do() {
 		}
 
 	}
+}
+
+func (e *engine) hasContextInScope(fn *ssa.Function) origin {
+	if o := e.hasContextInParams(fn); o != originNone {
+		return o
+	}
+	for _, fv := range fn.FreeVars {
+		if e.isContextImpl(fv.Type()) {
+			return originVariable
+		}
+	}
+	for p := fn.Parent(); p != nil; p = p.Parent() {
+		for _, param := range dropFuncReceiver(p) {
+			if e.isContextImpl(param.Type()) {
+				return originVariable
+			}
+		}
+	}
+	return originNone
 }
 
 func (e *engine) hasContextInParams(fn *ssa.Function) origin {
@@ -168,7 +187,7 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		return
 	}
 
-	candidates := e.extractParentContextVariable(block)
+	candidates := e.extractParentContextVariable(block.Parent())
 	if len(candidates) == 0 {
 		return
 	}
@@ -216,6 +235,11 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 	switch a := value.(type) {
 	case *ssa.Parameter:
 		return candidates.MatchAny(a.Object())
+
+	case *ssa.FreeVar:
+		if binding := freeVarBinding(a); binding != nil {
+			return e.checkIfInheritParentCtx(binding, candidates, append(stack, value))
+		}
 
 	case *ssa.MakeInterface:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
@@ -331,19 +355,40 @@ func (e *engine) collectStoredCtxValues(addr ssa.Value) []ssa.Value {
 	return values
 }
 
-func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) (candidates []types.Object) {
-	parent := block.Parent()
-	if parent == nil {
-		return nil
-	}
-
-	for _, param := range dropFuncReceiver(parent) {
-		if e.isContextImpl(param.Type()) {
-			candidates = append(candidates, param.Object())
+func (e *engine) extractParentContextVariable(fn *ssa.Function) (c Candidates) {
+	// Walk up the hierarchy of functions.
+	for f := fn; f != nil; f = f.Parent() {
+		for _, param := range dropFuncReceiver(f) {
+			if e.isContextImpl(param.Type()) {
+				c = append(c, param.Object())
+			}
 		}
 	}
+	return c
+}
 
-	return candidates
+// freeVarBinding returns the SSA value bound to the free variable in the
+// enclosing function's MakeClosure instruction.
+func freeVarBinding(fv *ssa.FreeVar) ssa.Value {
+	closure := fv.Parent()
+	outer := closure.Parent()
+	if outer == nil {
+		return nil
+	}
+	idx := slices.Index(closure.FreeVars, fv)
+	if idx < 0 {
+		return nil
+	}
+	for _, block := range outer.Blocks {
+		for _, instr := range block.Instrs {
+			mc, ok := instr.(*ssa.MakeClosure)
+			if !ok || mc.Fn != closure || idx >= len(mc.Bindings) {
+				continue
+			}
+			return mc.Bindings[idx]
+		}
+	}
+	return nil
 }
 
 func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.Instruction) {
