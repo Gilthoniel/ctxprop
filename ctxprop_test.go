@@ -27,6 +27,14 @@ func TestMultipleInterfaces(t *testing.T) {
 	require.Len(t, result, 1)
 }
 
+func TestWronglyEmbeddedContext(t *testing.T) {
+	// Note: since Go does not recommend to store the context, we ignore those references.
+
+	testdata := analysistest.TestData()
+	result := analysistest.Run(t, testdata, Analyzer, "d")
+	require.Len(t, result, 1)
+}
+
 func TestAnalyzer_run_skipsOnMissingSSA(t *testing.T) {
 	res, err := Analyzer.Run(&analysis.Pass{})
 	require.NoError(t, err)

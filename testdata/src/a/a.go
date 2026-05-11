@@ -32,6 +32,11 @@ func _(ctx context.Context) error {
 	return nil
 }
 
+func _(ctx context.Context) error {
+	_ = bar(MyContext{Context: ctx})
+	return nil
+}
+
 func foo(ctx context.Context, _ bool) error {
 	return ctx.Err()
 }

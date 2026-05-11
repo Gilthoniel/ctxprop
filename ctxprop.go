@@ -131,7 +131,7 @@ func (e *engine) do() {
 }
 
 func (e *engine) hasContextInParams(fn *ssa.Function) origin {
-	for _, param := range fn.Params {
+	for _, param := range dropFuncReceiver(fn) {
 		if e.isContextImpl(param.Type()) {
 			return originVariable
 		}
@@ -140,6 +140,16 @@ func (e *engine) hasContextInParams(fn *ssa.Function) origin {
 		}
 	}
 	return originNone
+}
+
+// dropFuncReceiver returns fn.Params with the receiver dropped. Embedded
+// contexts on a receiver are not treated as a propagation source — they're an
+// antipattern (Go discourages storing a context on a struct).
+func dropFuncReceiver(fn *ssa.Function) []*ssa.Parameter {
+	if fn.Signature != nil && fn.Signature.Recv() != nil && len(fn.Params) > 0 {
+		return fn.Params[1:]
+	}
+	return fn.Params
 }
 
 // origin indicates if the parent context is provided from a variable or from a
@@ -220,23 +230,47 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return match
 
 	case *ssa.Alloc:
-		if a.Referrers() == nil {
+		values := e.collectStoredCtxValues(a)
+		if len(values) == 0 {
 			return false
 		}
-		match := false
-		for _, ref := range *a.Referrers() {
-			store, ok := ref.(*ssa.Store)
-			if !ok {
-				continue
-			}
-			match = true
-			if !e.checkIfInheritParentCtx(store.Val, candidates, append(stack, value)) {
-				return false
-			}
+		match := true
+		for _, v := range values {
+			match = match && e.checkIfInheritParentCtx(v, candidates, append(stack, value))
 		}
 		return match
 	}
 	return false
+}
+
+// collectStoredCtxValues returns the values written through Store referrers of
+// addr, including values stored into any context-typed field reached via a
+// FieldAddr. This covers both `var x = ctx` and `T{Ctx: ctx}` patterns.
+func (e *engine) collectStoredCtxValues(addr ssa.Value) []ssa.Value {
+	if addr.Referrers() == nil {
+		return nil
+	}
+	var values []ssa.Value
+	for _, ref := range *addr.Referrers() {
+		switch r := ref.(type) {
+		case *ssa.Store:
+			values = append(values, r.Val)
+		case *ssa.FieldAddr:
+			ptr, ok := r.Type().(*types.Pointer)
+			if !ok || !e.isContextImpl(ptr.Elem()) {
+				continue
+			}
+			if r.Referrers() == nil {
+				continue
+			}
+			for _, fieldRef := range *r.Referrers() {
+				if store, ok := fieldRef.(*ssa.Store); ok {
+					values = append(values, store.Val)
+				}
+			}
+		}
+	}
+	return values
 }
 
 func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) (candidates []types.Object) {
@@ -245,7 +279,7 @@ func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) (candidates
 		return nil
 	}
 
-	for _, param := range parent.Params {
+	for _, param := range dropFuncReceiver(parent) {
 		if e.isContextImpl(param.Type()) {
 			candidates = append(candidates, param.Object())
 		}
@@ -288,7 +322,7 @@ func (e *engine) extractParentContextProvider(block *ssa.BasicBlock) types.Objec
 		return nil
 	}
 
-	for _, param := range parent.Params {
+	for _, param := range dropFuncReceiver(parent) {
 		if e.isContextProvider(param.Type()) {
 			return param.Object()
 		}
