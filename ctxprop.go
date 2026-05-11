@@ -3,6 +3,7 @@ package ctxprop
 import (
 	"go/token"
 	"go/types"
+	"slices"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -157,8 +158,8 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		return
 	}
 
-	parentCtxVar := e.extractParentContextVariable(block)
-	if parentCtxVar == nil {
+	candidates := e.extractParentContextVariable(block)
+	if len(candidates) == 0 {
 		return
 	}
 
@@ -166,32 +167,32 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
-		if !e.checkIfInheritParentCtx(arg, parentCtxVar) {
+		if !e.checkIfInheritParentCtx(arg, candidates) {
 			e.report(analysis.Diagnostic{
 				Pos:     instr.Pos(),
 				Message: "function must inherit the context from the parent",
 				Related: []analysis.RelatedInformation{{
 					Pos:     arg.Pos(),
-					Message: "Use " + parentCtxVar.Name() + " instead",
+					Message: "Use " + candidates[0].Name() + " instead",
 				}},
 			})
 		}
 	}
 }
 
-func (e *engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Object) bool {
+func (e *engine) checkIfInheritParentCtx(arg ssa.Value, candidates Candidates) bool {
 	// At this point we know that the argument implements <context.Context>
 	// so we need to verify if it inherits from the parent context.
 	switch a := arg.(type) {
 	case *ssa.Parameter:
-		return areIdenticalVariable(a.Object(), parentCtxVar)
+		return candidates.MatchAny(a.Object())
 
 	case *ssa.MakeInterface:
-		return e.checkIfInheritParentCtx(a.X, parentCtxVar)
+		return e.checkIfInheritParentCtx(a.X, candidates)
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if e.checkIfInheritParentCtx(arg, parentCtxVar) {
+			if e.checkIfInheritParentCtx(arg, candidates) {
 				return true
 			}
 		}
@@ -199,7 +200,7 @@ func (e *engine) checkIfInheritParentCtx(arg ssa.Value, parentCtxVar types.Objec
 	return false
 }
 
-func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) types.Object {
+func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) (candidates []types.Object) {
 	parent := block.Parent()
 	if parent == nil {
 		return nil
@@ -207,11 +208,11 @@ func (e *engine) extractParentContextVariable(block *ssa.BasicBlock) types.Objec
 
 	for _, param := range parent.Params {
 		if e.isContextImpl(param.Type()) {
-			return param.Object()
+			candidates = append(candidates, param.Object())
 		}
 	}
 
-	return nil
+	return candidates
 }
 
 func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.Instruction) {
@@ -291,6 +292,14 @@ func (e *engine) isContextImpl(t types.Type) bool {
 
 func (e *engine) isContextProvider(t types.Type) bool {
 	return types.Implements(t, e.ctxProviderIFace)
+}
+
+type Candidates []types.Object
+
+func (c Candidates) MatchAny(obj types.Object) bool {
+	return slices.ContainsFunc(c, func(candidate types.Object) bool {
+		return areIdenticalVariable(obj, candidate)
+	})
 }
 
 func areIdenticalVariable(a, b types.Object) bool {

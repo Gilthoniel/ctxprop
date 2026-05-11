@@ -21,6 +21,12 @@ func TestHttpHandler(t *testing.T) {
 	require.Len(t, result, 1)
 }
 
+func TestMultipleInterfaces(t *testing.T) {
+	testdata := analysistest.TestData()
+	result := analysistest.Run(t, testdata, Analyzer, "c")
+	require.Len(t, result, 1)
+}
+
 func TestAnalyzer_run_skipsOnMissingSSA(t *testing.T) {
 	res, err := Analyzer.Run(&analysis.Pass{})
 	require.NoError(t, err)
