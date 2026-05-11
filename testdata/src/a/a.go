@@ -1,13 +1,19 @@
 package a
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 func foo(ctx context.Context) error {
 	newCtx := Wrap(ctx)
-	bar(ctx)
-	bar(newCtx)
-	bar(context.Background()) // want `function must inherit the context from the parent`
-	return ctx.Err()
+	_ = bar(ctx)
+	_ = bar(newCtx)
+	_ = bar(context.Background()) // want `function must inherit the context from the parent`
+
+	anotherCtx, err := NewContext(ctx)
+	_ = bar(anotherCtx)
+	return err
 }
 
 func bar(ctx context.Context) error {
@@ -16,6 +22,10 @@ func bar(ctx context.Context) error {
 
 type MyContext struct {
 	context.Context
+}
+
+func NewContext(ctx context.Context) (MyContext, error) {
+	return MyContext{ctx}, ctx.Err()
 }
 
 func Wrap(ctx context.Context) MyContext {
@@ -34,3 +44,18 @@ func _(ctx context.Context, opts ...Option) context.Context {
 }
 
 type Option func(context.Context) context.Context
+
+type Service struct{}
+
+func (s Service) Hello(ctx AuthContext, name string) string {
+	name = s.ToLowerCase(ctx, name)
+	return name
+}
+
+func (s Service) ToLowerCase(ctx context.Context, name string) string {
+	return strings.ToLower(name)
+}
+
+type AuthContext interface {
+	context.Context
+}
