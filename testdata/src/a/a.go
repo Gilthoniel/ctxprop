@@ -25,3 +25,12 @@ func Wrap(ctx context.Context) MyContext {
 func (MyContext) Err() error {
 	return nil
 }
+
+func _(ctx context.Context, opts ...Option) context.Context {
+	for _, opt := range opts {
+		ctx = opt(ctx)
+	}
+	return ctx
+}
+
+type Option func(context.Context) context.Context

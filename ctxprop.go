@@ -167,7 +167,7 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
-		if !e.checkIfInheritParentCtx(arg, candidates) {
+		if !e.checkIfInheritParentCtx(arg, candidates, nil) {
 			e.report(analysis.Diagnostic{
 				Pos:     instr.Pos(),
 				Message: "function must inherit the context from the parent",
@@ -180,22 +180,38 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 	}
 }
 
-func (e *engine) checkIfInheritParentCtx(arg ssa.Value, candidates Candidates) bool {
+func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates, stack []ssa.Value) bool {
+	if slices.Contains(stack, value) {
+		// When infinite recursivity is detected, we consider this branch to be ok.
+		return true
+	}
+
 	// At this point we know that the argument implements <context.Context>
 	// so we need to verify if it inherits from the parent context.
-	switch a := arg.(type) {
+	switch a := value.(type) {
 	case *ssa.Parameter:
 		return candidates.MatchAny(a.Object())
 
 	case *ssa.MakeInterface:
-		return e.checkIfInheritParentCtx(a.X, candidates)
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if e.checkIfInheritParentCtx(arg, candidates) {
+			if e.checkIfInheritParentCtx(arg, candidates, append(stack, arg)) {
 				return true
 			}
 		}
+
+	case *ssa.Phi:
+		// Since a PHI node indicates represents a potential value, we need to check that
+		// all edges will inherit. We however need to make sure to stop when an object
+		// has already been verified.
+
+		match := true
+		for _, edge := range a.Edges {
+			match = match && e.checkIfInheritParentCtx(edge, candidates, append(stack, value))
+		}
+		return match
 	}
 	return false
 }
