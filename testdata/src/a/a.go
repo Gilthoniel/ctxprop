@@ -85,3 +85,12 @@ func (s Service) ToLowerCase(ctx context.Context, name string) string {
 type AuthContext interface {
 	context.Context
 }
+
+type ExtendedAuthContext interface {
+	context.Context
+	IsAuthenticated() bool
+}
+
+func _(ctx ExtendedAuthContext) error {
+	return bar(ctx)
+}

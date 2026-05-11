@@ -221,6 +221,8 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.ChangeType:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.ChangeInterface:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.Extract:
 		return e.checkIfInheritParentCtx(a.Tuple, candidates, append(stack, value))
 	case *ssa.UnOp:
