@@ -20,13 +20,13 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	ssa := findSSA(pass)
-	if ssa == nil {
+	buildSSA := findSSA(pass)
+	if buildSSA == nil {
 		return nil, nil
 	}
 
 	e := engine{
-		ssa:    ssa,
+		ssa:    buildSSA,
 		report: pass.Report,
 	}
 
@@ -36,11 +36,11 @@ func run(pass *analysis.Pass) (any, error) {
 }
 
 func findSSA(pass *analysis.Pass) *buildssa.SSA {
-	ssa, ok := pass.ResultOf[buildssa.Analyzer]
+	buildSSA, ok := pass.ResultOf[buildssa.Analyzer]
 	if !ok {
 		return nil
 	}
-	typedSSA, ok := ssa.(*buildssa.SSA)
+	typedSSA, ok := buildSSA.(*buildssa.SSA)
 	if !ok {
 		return nil
 	}
@@ -223,6 +223,8 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.ChangeInterface:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.TypeAssert:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.Extract:
 		return e.checkIfInheritParentCtx(a.Tuple, candidates, append(stack, value))
 	case *ssa.UnOp:
@@ -230,6 +232,12 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 	case *ssa.FieldAddr:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.Field:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.IndexAddr:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.Slice:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.Lookup:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 
 	case *ssa.Call:
@@ -251,6 +259,17 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return match
 
 	case *ssa.Alloc:
+		values := e.collectStoredCtxValues(a)
+		if len(values) == 0 {
+			return false
+		}
+		match := true
+		for _, v := range values {
+			match = match && e.checkIfInheritParentCtx(v, candidates, append(stack, value))
+		}
+		return match
+
+	case *ssa.MakeMap:
 		values := e.collectStoredCtxValues(a)
 		if len(values) == 0 {
 			return false
@@ -289,6 +308,24 @@ func (e *engine) collectStoredCtxValues(addr ssa.Value) []ssa.Value {
 					values = append(values, store.Val)
 				}
 			}
+		case *ssa.IndexAddr:
+			ptr, ok := r.Type().(*types.Pointer)
+			if !ok || !e.isContextImpl(ptr.Elem()) {
+				continue
+			}
+			if r.Referrers() == nil {
+				continue
+			}
+			for _, elemRef := range *r.Referrers() {
+				if store, ok := elemRef.(*ssa.Store); ok {
+					values = append(values, store.Val)
+				}
+			}
+		case *ssa.MapUpdate:
+			if !e.isContextImpl(r.Value.Type()) {
+				continue
+			}
+			values = append(values, r.Value)
 		}
 	}
 	return values

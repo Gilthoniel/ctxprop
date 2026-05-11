@@ -96,3 +96,71 @@ type ExtendedAuthContext interface {
 func _(ctx ExtendedAuthContext) error {
 	return bar(ctx)
 }
+
+// ssa.TypeAssert (comma-ok form lowers to Extract -> TypeAssert)
+func _(ctx context.Context) error {
+	if c, ok := ctx.(ExtendedAuthContext); ok {
+		_ = bar(c)
+	}
+	if c := ctx.(ExtendedAuthContext); c.IsAuthenticated() {
+		_ = bar(c)
+	}
+	return nil
+}
+
+// ssa.TypeAssert on a non-parent value: should still be reported.
+func _(ctx context.Context, other any) error {
+	if c, ok := other.(context.Context); ok {
+		_ = bar(c) // want `function must inherit the context from the parent`
+	}
+	return nil
+}
+
+// ssa.IndexAddr + ssa.Slice on a ssa.Alloc backing array (slice literal).
+func _(ctx context.Context) error {
+	ctxs := []context.Context{ctx}
+	return bar(ctxs[0])
+}
+
+// ssa.IndexAddr on a ssa.Alloc'd array (no Slice).
+func _(ctx context.Context) error {
+	var arr [1]context.Context
+	arr[0] = ctx
+	return bar(arr[0])
+}
+
+// ssa.IndexAddr where the stored value does not derive from the parent ctx.
+func _(ctx context.Context) error {
+	ctxs := []context.Context{context.Background()}
+	return bar(ctxs[0]) // want `function must inherit the context from the parent`
+}
+
+// ssa.Lookup + ssa.MakeMap with ssa.MapUpdate carrying the parent ctx.
+func _(ctx context.Context) error {
+	m := map[string]context.Context{"k": ctx}
+	return bar(m["k"])
+}
+
+// ssa.Lookup where the map's MapUpdate does not derive from the parent ctx.
+func _(ctx context.Context) error {
+	m := map[string]context.Context{"k": context.Background()}
+	return bar(m["k"]) // want `function must inherit the context from the parent`
+}
+
+// ssa.MakeMap with no MapUpdate referrers (empty map literal).
+func _(ctx context.Context) error {
+	m := map[string]context.Context{}
+	return bar(m["k"]) // want `function must inherit the context from the parent`
+}
+
+// ssa.IndexAddr guard: array element type is `any`, not context.
+func _(ctx context.Context) error {
+	arr := [1]any{ctx}
+	return bar(arr[0].(context.Context)) // want `function must inherit the context from the parent`
+}
+
+// ssa.MapUpdate guard: map value type is `any`, not context.
+func _(ctx context.Context) error {
+	m := map[string]any{"k": ctx}
+	return bar(m["k"].(context.Context)) // want `function must inherit the context from the parent`
+}
