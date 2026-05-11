@@ -29,6 +29,8 @@ func _(ctx context.Context) error {
 
 	_ = foo(anotherCtx, anotherCtx.IsAuthenticated)
 	_ = bar(anotherCtx)
+	_ = bar(anotherCtx.Context)
+	_ = bar(Wrap(ctx).Context)
 	return nil
 }
 

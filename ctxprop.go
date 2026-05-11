@@ -227,6 +227,10 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return e.checkIfInheritParentCtx(a.Tuple, candidates, append(stack, value))
 	case *ssa.UnOp:
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.FieldAddr:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+	case *ssa.Field:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
