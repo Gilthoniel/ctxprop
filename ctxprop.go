@@ -198,10 +198,12 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 	case *ssa.Extract:
 		return e.checkIfInheritParentCtx(a.Tuple, candidates, append(stack, value))
+	case *ssa.UnOp:
+		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if e.checkIfInheritParentCtx(arg, candidates, append(stack, arg)) {
+			if e.checkIfInheritParentCtx(arg, candidates, append(stack, value)) {
 				return true
 			}
 		}
@@ -214,6 +216,23 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		match := true
 		for _, edge := range a.Edges {
 			match = match && e.checkIfInheritParentCtx(edge, candidates, append(stack, value))
+		}
+		return match
+
+	case *ssa.Alloc:
+		if a.Referrers() == nil {
+			return false
+		}
+		match := false
+		for _, ref := range *a.Referrers() {
+			store, ok := ref.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			match = true
+			if !e.checkIfInheritParentCtx(store.Val, candidates, append(stack, value)) {
+				return false
+			}
 		}
 		return match
 	}

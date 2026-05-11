@@ -5,15 +5,35 @@ import (
 	"strings"
 )
 
-func foo(ctx context.Context) error {
+func _(ctx context.Context) error {
 	newCtx := Wrap(ctx)
 	_ = bar(ctx)
 	_ = bar(newCtx)
 	_ = bar(context.Background()) // want `function must inherit the context from the parent`
 
 	anotherCtx, err := NewContext(ctx)
+	if err != nil {
+		return err
+	}
+
 	_ = bar(anotherCtx)
-	return err
+
+	return nil
+}
+
+func _(ctx context.Context) error {
+	anotherCtx, err := NewContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	_ = foo(anotherCtx, anotherCtx.IsAuthenticated)
+	_ = bar(anotherCtx)
+	return nil
+}
+
+func foo(ctx context.Context, _ bool) error {
+	return ctx.Err()
 }
 
 func bar(ctx context.Context) error {
@@ -22,10 +42,11 @@ func bar(ctx context.Context) error {
 
 type MyContext struct {
 	context.Context
+	IsAuthenticated bool
 }
 
 func NewContext(ctx context.Context) (MyContext, error) {
-	return MyContext{ctx}, ctx.Err()
+	return MyContext{Context: ctx, IsAuthenticated: true}, ctx.Err()
 }
 
 func Wrap(ctx context.Context) MyContext {
