@@ -105,7 +105,7 @@ func (e *engine) do() {
 	}
 
 	visited := make([]ssa.Value, 0, 16)
-	candidates := make([]Candidate, 0, 4)
+	candidates := make([]parentCandidate, 0, 4)
 	for _, fn := range e.ssa.SrcFuncs {
 		if fn == nil {
 			continue
@@ -122,7 +122,7 @@ func (e *engine) do() {
 	}
 }
 
-func (e *engine) checkInstruction(candidates []Candidate, instr ssa.Instruction, visited []ssa.Value) {
+func (e *engine) checkInstruction(candidates []parentCandidate, instr ssa.Instruction, visited []ssa.Value) {
 	call, ok := instr.(*ssa.Call)
 	if !ok {
 		return
@@ -158,23 +158,23 @@ func dropCallReceiver(call *ssa.Call) []ssa.Value {
 	return args[1:]
 }
 
-func anyInherits(cs []Candidate, v ssa.Value, visited []ssa.Value) bool {
-	for _, c := range cs {
-		if c.Inherits(v, visited) {
+func anyInherits(candidates []parentCandidate, v ssa.Value, visited []ssa.Value) bool {
+	for _, candidate := range candidates {
+		if candidate.Inherits(v, visited) {
 			return true
 		}
 	}
 	return false
 }
 
-func (e *engine) collectCandidates(fn *ssa.Function, out []Candidate) []Candidate {
+func (e *engine) collectCandidates(fn *ssa.Function, out []parentCandidate) []parentCandidate {
 	for f := fn; f != nil; f = f.Parent() {
 		for _, p := range dropFuncReceiver(f) {
 			switch {
 			case e.isContextImpl(p.Type()):
-				out = append(out, &variableCandidate{obj: p.Object(), e: e})
+				out = append(out, parentCandidate{kind: candidateVariable, obj: p.Object(), e: e})
 			case e.isContextProvider(p.Type()):
-				out = append(out, &providerCandidate{obj: p.Object(), e: e})
+				out = append(out, parentCandidate{kind: candidateProvider, obj: p.Object(), e: e})
 			}
 		}
 
@@ -195,28 +195,38 @@ func dropFuncReceiver(fn *ssa.Function) []*ssa.Parameter {
 	return fn.Params
 }
 
-type Candidate interface {
-	Inherits(v ssa.Value, visited []ssa.Value) bool
+type candidateKind uint8
 
-	Pos() token.Pos
+const (
+	candidateVariable candidateKind = iota
+	candidateProvider
+)
 
-	ReplacementName() string
+type parentCandidate struct {
+	kind candidateKind
+	obj  types.Object
+	e    *engine
 }
 
-type variableCandidate struct {
-	obj types.Object
-	e   *engine
-}
-
-func (c *variableCandidate) Pos() token.Pos {
+func (c *parentCandidate) Pos() token.Pos {
 	return c.obj.Pos()
 }
 
-func (c *variableCandidate) ReplacementName() string {
+func (c *parentCandidate) ReplacementName() string {
+	if c.kind == candidateProvider {
+		return c.obj.Name() + ".Context()"
+	}
 	return c.obj.Name()
 }
 
-func (c *variableCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool {
+	if c.kind == candidateProvider {
+		return c.inheritsProvider(value, visited)
+	}
+	return c.inheritsVariable(value, visited)
+}
+
+func (c *parentCandidate) inheritsVariable(value ssa.Value, visited []ssa.Value) bool {
 	if slices.Contains(visited, value) {
 		// When infinite recursivity is detected, we consider this branch to be ok.
 		return true
@@ -229,35 +239,35 @@ func (c *variableCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool 
 
 	case *ssa.FreeVar:
 		if binding := freeVarBinding(a); binding != nil {
-			return c.Inherits(binding, visited)
+			return c.inheritsVariable(binding, visited)
 		}
 
 	case *ssa.MakeInterface:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.ChangeType:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.ChangeInterface:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.TypeAssert:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.Extract:
-		return c.Inherits(a.Tuple, visited)
+		return c.inheritsVariable(a.Tuple, visited)
 	case *ssa.UnOp:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.FieldAddr:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.Field:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.IndexAddr:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.Slice:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 	case *ssa.Lookup:
-		return c.Inherits(a.X, visited)
+		return c.inheritsVariable(a.X, visited)
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if c.Inherits(arg, visited) {
+			if c.inheritsVariable(arg, visited) {
 				return true
 			}
 		}
@@ -268,7 +278,7 @@ func (c *variableCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool 
 		// has already been verified.
 		match := true
 		for _, edge := range a.Edges {
-			match = match && c.Inherits(edge, visited)
+			match = match && c.inheritsVariable(edge, visited)
 		}
 		return match
 
@@ -281,32 +291,19 @@ func (c *variableCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool 
 	return false
 }
 
-func (c *variableCandidate) matchStoredValues(addr ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) matchStoredValues(addr ssa.Value, visited []ssa.Value) bool {
 	values := c.e.collectStoredCtxValues(addr)
 	if len(values) == 0 {
 		return false
 	}
 	match := true
 	for _, v := range values {
-		match = match && c.Inherits(v, visited)
+		match = match && c.inheritsVariable(v, visited)
 	}
 	return match
 }
 
-type providerCandidate struct {
-	obj types.Object
-	e   *engine
-}
-
-func (c *providerCandidate) Pos() token.Pos {
-	return c.obj.Pos()
-}
-
-func (c *providerCandidate) ReplacementName() string {
-	return c.obj.Name() + ".Context()"
-}
-
-func (c *providerCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value) bool {
 	if slices.Contains(visited, value) {
 		// Prevent an infinite recursion.
 		return true
@@ -320,21 +317,21 @@ func (c *providerCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool 
 			return true
 		}
 		for _, v := range a.Call.Args {
-			if c.Inherits(v, visited) {
+			if c.inheritsProvider(v, visited) {
 				return true
 			}
 		}
 
 	case *ssa.MakeInterface:
-		return c.Inherits(a.X, visited)
+		return c.inheritsProvider(a.X, visited)
 
 	case *ssa.Extract:
-		return c.Inherits(a.Tuple, visited)
+		return c.inheritsProvider(a.Tuple, visited)
 	}
 	return false
 }
 
-func (c *providerCandidate) isProvidingContext(call ssa.CallCommon, visited []ssa.Value) bool {
+func (c *parentCandidate) isProvidingContext(call ssa.CallCommon, visited []ssa.Value) bool {
 	if !types.Identical(c.e.ctxProviderIFace.Method(0).Signature(), call.Signature()) {
 		return false
 	}
@@ -347,7 +344,7 @@ func (c *providerCandidate) isProvidingContext(call ssa.CallCommon, visited []ss
 	return c.isTheProvider(call.Args[0], visited)
 }
 
-func (c *providerCandidate) isTheProvider(v ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) isTheProvider(v ssa.Value, visited []ssa.Value) bool {
 	if slices.Contains(visited, v) {
 		return true
 	}
