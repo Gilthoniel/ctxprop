@@ -139,7 +139,7 @@ func (e *engine) checkInstruction(candidates []parentCandidate, instr ssa.Instru
 			Pos:     instr.Pos(),
 			Message: "function must inherit the context from the parent",
 			Related: []analysis.RelatedInformation{{
-				Pos:     candidates[0].Pos(),
+				Pos:     instr.Pos(),
 				Message: "Use " + candidates[0].ReplacementName() + " instead",
 			}},
 		})
