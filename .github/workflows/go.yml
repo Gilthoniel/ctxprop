@@ -9,28 +9,57 @@ on:
   pull_request:
     branches: [ "master" ]
 
-jobs:
+permissions:
+  contents: read
 
-  build:
-    runs-on: ubuntu-latest
+jobs:
+  lint:
+    strategy:
+      matrix:
+        go: [ stable ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+
+  test:
+    strategy:
+      matrix:
+        go: [ stable ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v6
 
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
-        go-version: '1.25'
+        go-version: ${{ matrix.go }}
 
     - name: Build
       run: go build -v ./...
 
-    - name: Test
+    - name: Test with coverage
+      if: ${{ matrix.os == 'ubuntu-latest' }}
       run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
+    - name: Test
+      if: ${{ matrix.os != 'ubuntu-latest' }}
+      run: go test -race ./...
+
     - name: Coverage
+      if: ${{ matrix.os == 'ubuntu-latest' }}
       run: go tool cover -func=coverage.out
 
     - name: Upload coverage reports to Codecov
       uses: codecov/codecov-action@v5
+      if: ${{ matrix.os == 'ubuntu-latest' }}
       with:
         token: ${{ secrets.CODECOV_TOKEN }}

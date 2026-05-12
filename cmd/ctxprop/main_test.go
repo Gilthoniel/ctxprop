@@ -12,7 +12,7 @@ func Test(t *testing.T) {
 	outputFile, err := os.CreateTemp(dir, "stdout*")
 	require.NoError(t, err)
 
-	defer outputFile.Close()
+	defer func() { _ = outputFile.Close() }()
 
 	defer func() {
 		if r := recover(); r != nil {

@@ -4,3 +4,6 @@ build:
 
 install:
 	go install ./cmd/ctxprop
+
+lint:
+	golangci-lint run
