@@ -1,17 +1,14 @@
 package ctxprop
 
 import (
-	"go/ast"
-	"go/types"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/ssa"
-	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 func BenchmarkAnalyzer(b *testing.B) {
@@ -35,10 +32,6 @@ func BenchmarkAnalyzer(b *testing.B) {
 	}
 }
 
-// buildBenchSSA loads the testdata package and its dependencies, builds SSA
-// once, and returns a buildssa.SSA scoped to the project package only — so the
-// benchmark times the analyzer's traversal of project code, not buildssa over
-// the stdlib closure.
 func buildBenchSSA(b *testing.B, pattern string) *buildssa.SSA {
 	b.Helper()
 
@@ -59,38 +52,13 @@ func buildBenchSSA(b *testing.B, pattern string) *buildssa.SSA {
 	if len(pkgs) != 1 {
 		b.Fatalf("expected one package for %q, got %d", pattern, len(pkgs))
 	}
-	pkg := pkgs[0]
-	if len(pkg.Errors) > 0 {
-		b.Fatalf("package %s has errors: %v", pkg.PkgPath, pkg.Errors)
+	if len(pkgs[0].Errors) > 0 {
+		b.Fatalf("package %s has errors: %v", pkgs[0].PkgPath, pkgs[0].Errors)
 	}
 
-	prog, ssapkgs := ssautil.AllPackages(pkgs, 0)
-	prog.Build()
-	ssapkg := ssapkgs[0]
-
-	var funcs []*ssa.Function
-	var addAnons func(*ssa.Function)
-	addAnons = func(f *ssa.Function) {
-		funcs = append(funcs, f)
-		for _, anon := range f.AnonFuncs {
-			addAnons(anon)
-		}
+	graph, err := checker.Analyze([]*analysis.Analyzer{buildssa.Analyzer}, pkgs, nil)
+	if err != nil {
+		b.Fatalf("analyze: %v", err)
 	}
-	for _, file := range pkg.Syntax {
-		for _, decl := range file.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			fn, _ := pkg.TypesInfo.Defs[fd.Name].(*types.Func)
-			if fn == nil {
-				continue
-			}
-			if f := prog.FuncValue(fn); f != nil {
-				addAnons(f)
-			}
-		}
-	}
-
-	return &buildssa.SSA{Pkg: ssapkg, SrcFuncs: funcs}
+	return graph.Roots[0].Result.(*buildssa.SSA)
 }
