@@ -324,9 +324,18 @@ func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value)
 
 	case *ssa.MakeInterface:
 		return c.inheritsProvider(a.X, visited)
-
 	case *ssa.Extract:
 		return c.inheritsProvider(a.Tuple, visited)
+
+	case *ssa.Phi:
+		// All incoming edges must trace back to the provider; otherwise
+		// some control-flow path produces a context that was not derived
+		// from it.
+		match := true
+		for _, edge := range a.Edges {
+			match = match && c.inheritsProvider(edge, visited)
+		}
+		return match
 	}
 	return false
 }
