@@ -108,78 +108,13 @@ func (e *engine) do() {
 		if fn == nil {
 			continue
 		}
-
-		switch e.hasContextInScope(fn) {
-		case originVariable:
-			for _, block := range fn.Blocks {
-				for _, instr := range block.Instrs {
-					e.checkInstruction(block, instr)
-				}
-			}
-
-		case originProvider:
-			for _, block := range fn.Blocks {
-				for _, instr := range block.Instrs {
-					e.checkInstructionForProvider(block, instr)
-				}
-			}
-
-		case originNone:
-		}
-
-	}
-}
-
-func (e *engine) hasContextInScope(fn *ssa.Function) origin {
-	if o := e.hasContextInParams(fn); o != originNone {
-		return o
-	}
-	for _, fv := range fn.FreeVars {
-		if e.isContextImpl(fv.Type()) {
-			return originVariable
-		}
-	}
-	for p := fn.Parent(); p != nil; p = p.Parent() {
-		for _, param := range dropFuncReceiver(p) {
-			if e.isContextImpl(param.Type()) {
-				return originVariable
+		for _, block := range fn.Blocks {
+			for _, instr := range block.Instrs {
+				e.checkInstruction(block, instr)
 			}
 		}
 	}
-	return originNone
 }
-
-func (e *engine) hasContextInParams(fn *ssa.Function) origin {
-	for _, param := range dropFuncReceiver(fn) {
-		if e.isContextImpl(param.Type()) {
-			return originVariable
-		}
-		if e.isContextProvider(param.Type()) {
-			return originProvider
-		}
-	}
-	return originNone
-}
-
-// dropFuncReceiver returns fn.Params with the receiver dropped. Embedded
-// contexts on a receiver are not treated as a propagation source — they're an
-// antipattern (Go discourages storing a context on a struct).
-func dropFuncReceiver(fn *ssa.Function) []*ssa.Parameter {
-	if fn.Signature != nil && fn.Signature.Recv() != nil && len(fn.Params) > 0 {
-		return fn.Params[1:]
-	}
-	return fn.Params
-}
-
-// origin indicates if the parent context is provided from a variable or from a
-// provider.
-type origin int
-
-const (
-	originNone = iota
-	originVariable
-	originProvider
-)
 
 func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) {
 	call, ok := instr.(*ssa.Call)
@@ -187,7 +122,7 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		return
 	}
 
-	candidates := e.extractParentContextVariable(block.Parent())
+	candidates := e.collectCandidates(block.Parent())
 	if len(candidates) == 0 {
 		return
 	}
@@ -196,22 +131,20 @@ func (e *engine) checkInstruction(block *ssa.BasicBlock, instr ssa.Instruction) 
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
-		if !e.checkIfInheritParentCtx(arg, candidates, nil) {
-			e.report(analysis.Diagnostic{
-				Pos:     instr.Pos(),
-				Message: "function must inherit the context from the parent",
-				Related: []analysis.RelatedInformation{{
-					Pos:     arg.Pos(),
-					Message: "Use " + candidates[0].Name() + " instead",
-				}},
-			})
+		if anyInherits(candidates, arg) {
+			continue
 		}
+		e.report(analysis.Diagnostic{
+			Pos:     instr.Pos(),
+			Message: "function must inherit the context from the parent",
+			Related: []analysis.RelatedInformation{{
+				Pos:     candidates[0].Pos(),
+				Message: "Use " + candidates[0].ReplacementName() + " instead",
+			}},
+		})
 	}
 }
 
-// dropCallReceiver returns call.Call.Args with the implicit receiver dropped for
-// static method calls. We must not treat that slot as a propagation candidate —
-// for the same reason dropFuncReceiver excludes the parent function's receiver.
 func dropCallReceiver(call *ssa.Call) []ssa.Value {
 	args := call.Call.Args
 	callee := call.Call.StaticCallee()
@@ -224,49 +157,108 @@ func dropCallReceiver(call *ssa.Call) []ssa.Value {
 	return args[1:]
 }
 
-func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates, stack []ssa.Value) bool {
+func anyInherits(cs []Candidate, v ssa.Value) bool {
+	for _, c := range cs {
+		if c.Inherits(v, nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *engine) collectCandidates(fn *ssa.Function) []Candidate {
+	for f := fn; f != nil; f = f.Parent() {
+		var out []Candidate
+		for _, p := range dropFuncReceiver(f) {
+			switch {
+			case e.isContextImpl(p.Type()):
+				out = append(out, &variableCandidate{obj: p.Object(), e: e})
+			case e.isContextProvider(p.Type()):
+				out = append(out, &providerCandidate{obj: p.Object(), e: e})
+			}
+		}
+
+		// As soon as at least one candidate is found for this scope, we stop and return
+		// since we want to privilege the nearest parent contexts (e.g. a closure taking
+		// a context as parameter).
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func dropFuncReceiver(fn *ssa.Function) []*ssa.Parameter {
+	if fn.Signature != nil && fn.Signature.Recv() != nil && len(fn.Params) > 0 {
+		return fn.Params[1:]
+	}
+	return fn.Params
+}
+
+type Candidate interface {
+	// Inherits returns when `v` inherits from the candidate.
+	Inherits(v ssa.Value, stack []ssa.Value) bool
+
+	Pos() token.Pos
+
+	ReplacementName() string
+}
+
+type variableCandidate struct {
+	obj types.Object
+	e   *engine
+}
+
+func (c *variableCandidate) Pos() token.Pos {
+	return c.obj.Pos()
+}
+
+func (c *variableCandidate) ReplacementName() string {
+	return c.obj.Name()
+}
+
+func (c *variableCandidate) Inherits(value ssa.Value, stack []ssa.Value) bool {
 	if slices.Contains(stack, value) {
 		// When infinite recursivity is detected, we consider this branch to be ok.
 		return true
 	}
+	stack = append(stack, value)
 
-	// At this point we know that the argument implements <context.Context>
-	// so we need to verify if it inherits from the parent context.
 	switch a := value.(type) {
 	case *ssa.Parameter:
-		return candidates.MatchAny(a.Object())
+		return areIdenticalVariable(a.Object(), c.obj)
 
 	case *ssa.FreeVar:
 		if binding := freeVarBinding(a); binding != nil {
-			return e.checkIfInheritParentCtx(binding, candidates, append(stack, value))
+			return c.Inherits(binding, stack)
 		}
 
 	case *ssa.MakeInterface:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.ChangeType:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.ChangeInterface:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.TypeAssert:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.Extract:
-		return e.checkIfInheritParentCtx(a.Tuple, candidates, append(stack, value))
+		return c.Inherits(a.Tuple, stack)
 	case *ssa.UnOp:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.FieldAddr:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.Field:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.IndexAddr:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.Slice:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 	case *ssa.Lookup:
-		return e.checkIfInheritParentCtx(a.X, candidates, append(stack, value))
+		return c.Inherits(a.X, stack)
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if e.checkIfInheritParentCtx(arg, candidates, append(stack, value)) {
+			if c.Inherits(arg, stack) {
 				return true
 			}
 		}
@@ -275,96 +267,152 @@ func (e *engine) checkIfInheritParentCtx(value ssa.Value, candidates Candidates,
 		// Since a PHI node indicates represents a potential value, we need to check that
 		// all edges will inherit. We however need to make sure to stop when an object
 		// has already been verified.
-
 		match := true
 		for _, edge := range a.Edges {
-			match = match && e.checkIfInheritParentCtx(edge, candidates, append(stack, value))
+			match = match && c.Inherits(edge, stack)
 		}
 		return match
 
 	case *ssa.Alloc:
-		values := e.collectStoredCtxValues(a)
-		if len(values) == 0 {
-			return false
-		}
-		match := true
-		for _, v := range values {
-			match = match && e.checkIfInheritParentCtx(v, candidates, append(stack, value))
-		}
-		return match
+		return c.matchStoredValues(a, stack)
 
 	case *ssa.MakeMap:
-		values := e.collectStoredCtxValues(a)
-		if len(values) == 0 {
-			return false
-		}
-		match := true
-		for _, v := range values {
-			match = match && e.checkIfInheritParentCtx(v, candidates, append(stack, value))
-		}
-		return match
+		return c.matchStoredValues(a, stack)
 	}
 	return false
 }
 
-// collectStoredCtxValues returns the values written through Store referrers of
-// addr, including values stored into any context-typed field reached via a
-// FieldAddr. This covers both `var x = ctx` and `T{Ctx: ctx}` patterns.
-func (e *engine) collectStoredCtxValues(addr ssa.Value) []ssa.Value {
-	if addr.Referrers() == nil {
-		return nil
+func (c *variableCandidate) matchStoredValues(addr ssa.Value, stack []ssa.Value) bool {
+	values := c.e.collectStoredCtxValues(addr)
+	if len(values) == 0 {
+		return false
 	}
-	var values []ssa.Value
-	for _, ref := range *addr.Referrers() {
+	match := true
+	for _, v := range values {
+		match = match && c.Inherits(v, stack)
+	}
+	return match
+}
+
+type providerCandidate struct {
+	obj types.Object
+	e   *engine
+}
+
+func (c *providerCandidate) Pos() token.Pos {
+	return c.obj.Pos()
+}
+
+func (c *providerCandidate) ReplacementName() string {
+	return c.obj.Name() + ".Context()"
+}
+
+func (c *providerCandidate) Inherits(value ssa.Value, stack []ssa.Value) bool {
+	if slices.Contains(stack, value) {
+		// Prevent an infinite recursion.
+		return true
+	}
+
+	// We check the inheritance of the value only once.
+	stack = append(stack, value)
+
+	switch a := value.(type) {
+	case *ssa.Call:
+		if c.isProvidingContext(a.Call, stack) {
+			// This is the call to the provider returning the parent context.
+			return true
+		}
+
+		return slices.ContainsFunc(a.Call.Args, func(v ssa.Value) bool {
+			return c.Inherits(v, stack)
+		})
+
+	case *ssa.MakeInterface:
+		return c.Inherits(a.X, stack)
+
+	case *ssa.Extract:
+		return c.Inherits(a.Tuple, stack)
+	}
+	return false
+}
+
+func (c *providerCandidate) isProvidingContext(call ssa.CallCommon, stack []ssa.Value) bool {
+	if !types.Identical(c.e.ctxProviderIFace.Method(0).Signature(), call.Signature()) {
+		return false
+	}
+	if call.Signature().Recv() == nil || len(call.Args) == 0 {
+		return false
+	}
+
+	// Only the first argument can match the provider (i.e. the receiver of the
+	// function call).
+	return c.isTheProvider(call.Args[0], stack)
+}
+
+func (c *providerCandidate) isTheProvider(v ssa.Value, stack []ssa.Value) bool {
+	if slices.Contains(stack, v) {
+		return true
+	}
+
+	stack = append(stack, v)
+
+	switch a := v.(type) {
+	case *ssa.Parameter:
+		return areIdenticalVariable(a.Object(), c.obj)
+
+	case *ssa.FreeVar:
+		if binding := freeVarBinding(a); binding != nil {
+			return c.isTheProvider(binding, stack)
+		}
+
+	case *ssa.UnOp:
+		return c.isTheProvider(a.X, stack)
+
+	case *ssa.Alloc:
+		for _, ref := range fromReferrers(a.Referrers()) {
+			if store, ok := ref.(*ssa.Store); ok && c.isTheProvider(store.Val, stack) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *engine) collectStoredCtxValues(addr ssa.Value) (values []ssa.Value) {
+	for _, ref := range fromReferrers(addr.Referrers()) {
 		switch r := ref.(type) {
 		case *ssa.Store:
 			values = append(values, r.Val)
+
 		case *ssa.FieldAddr:
 			ptr, ok := r.Type().(*types.Pointer)
 			if !ok || !e.isContextImpl(ptr.Elem()) {
 				continue
 			}
-			if r.Referrers() == nil {
-				continue
-			}
-			for _, fieldRef := range *r.Referrers() {
+			for _, fieldRef := range fromReferrers(r.Referrers()) {
 				if store, ok := fieldRef.(*ssa.Store); ok {
 					values = append(values, store.Val)
 				}
 			}
+
 		case *ssa.IndexAddr:
 			ptr, ok := r.Type().(*types.Pointer)
 			if !ok || !e.isContextImpl(ptr.Elem()) {
 				continue
 			}
-			if r.Referrers() == nil {
-				continue
-			}
-			for _, elemRef := range *r.Referrers() {
+			for _, elemRef := range fromReferrers(r.Referrers()) {
 				if store, ok := elemRef.(*ssa.Store); ok {
 					values = append(values, store.Val)
 				}
 			}
+
 		case *ssa.MapUpdate:
-			if !e.isContextImpl(r.Value.Type()) {
-				continue
+			if e.isContextImpl(r.Value.Type()) {
+				values = append(values, r.Value)
 			}
-			values = append(values, r.Value)
 		}
 	}
 	return values
-}
-
-func (e *engine) extractParentContextVariable(fn *ssa.Function) (c Candidates) {
-	// Walk up the hierarchy of functions.
-	for f := fn; f != nil; f = f.Parent() {
-		for _, param := range dropFuncReceiver(f) {
-			if e.isContextImpl(param.Type()) {
-				c = append(c, param.Object())
-			}
-		}
-	}
-	return c
 }
 
 // freeVarBinding returns the SSA value bound to the free variable in the
@@ -391,77 +439,6 @@ func freeVarBinding(fv *ssa.FreeVar) ssa.Value {
 	return nil
 }
 
-func (e *engine) checkInstructionForProvider(block *ssa.BasicBlock, instr ssa.Instruction) {
-	call, ok := instr.(*ssa.Call)
-	if !ok {
-		return
-	}
-
-	parentCtxProvider := e.extractParentContextProvider(block)
-	if parentCtxProvider == nil {
-		return
-	}
-
-	for _, arg := range dropCallReceiver(call) {
-		if !e.isContextImpl(arg.Type()) {
-			continue
-		}
-		if !e.checkIfCtxProvided(arg, parentCtxProvider) {
-			e.report(analysis.Diagnostic{
-				Pos:     instr.Pos(),
-				Message: "function must inherit the context from the parent",
-				Related: []analysis.RelatedInformation{{
-					Pos:     parentCtxProvider.Pos(),
-					Message: "Use " + parentCtxProvider.Name() + ".Context() instead",
-				}},
-			})
-		}
-	}
-}
-
-func (e *engine) extractParentContextProvider(block *ssa.BasicBlock) types.Object {
-	parent := block.Parent()
-	if parent == nil {
-		return nil
-	}
-
-	for _, param := range dropFuncReceiver(parent) {
-		if e.isContextProvider(param.Type()) {
-			return param.Object()
-		}
-	}
-
-	return nil
-}
-
-func (e *engine) checkIfCtxProvided(arg ssa.Value, parentCtxProvider types.Object) bool {
-	switch a := arg.(type) {
-	case *ssa.Call:
-		for _, arg := range a.Call.Args {
-			switch typedArg := arg.(type) {
-			case *ssa.Parameter:
-				if !areIdenticalVariable(typedArg.Object(), parentCtxProvider) {
-					return false
-				}
-
-				return types.Identical(e.ctxProviderIFace.Method(0).Signature(), a.Call.Signature())
-
-			default:
-				return e.checkIfCtxProvided(arg, parentCtxProvider)
-			}
-		}
-
-		return false
-
-	case *ssa.MakeInterface:
-		return e.checkIfCtxProvided(a.X, parentCtxProvider)
-
-	case *ssa.Extract:
-		return e.checkIfCtxProvided(a.Tuple, parentCtxProvider)
-	}
-	return false
-}
-
 func (e *engine) isContextImpl(t types.Type) bool {
 	return types.Implements(t, e.ctxIface)
 }
@@ -470,16 +447,15 @@ func (e *engine) isContextProvider(t types.Type) bool {
 	return types.Implements(t, e.ctxProviderIFace)
 }
 
-type Candidates []types.Object
-
-func (c Candidates) MatchAny(obj types.Object) bool {
-	return slices.ContainsFunc(c, func(candidate types.Object) bool {
-		return areIdenticalVariable(obj, candidate)
-	})
-}
-
 func areIdenticalVariable(a, b types.Object) bool {
 	aVar, aOk := a.(*types.Var)
 	bVar, bOk := b.(*types.Var)
 	return aOk && bOk && aVar == bVar
+}
+
+func fromReferrers(referrers *[]ssa.Instruction) []ssa.Instruction {
+	if referrers != nil {
+		return *referrers
+	}
+	return nil
 }

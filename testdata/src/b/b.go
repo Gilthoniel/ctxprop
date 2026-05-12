@@ -27,6 +27,15 @@ func addHandler(ctx context.Context) {
 	})
 }
 
+// Closure has no context-like param of its own; the request provider lives on
+// the enclosing function and is captured as a free variable.
+func nestedHandler(r *http.Request) {
+	func() {
+		foo(r.Context())
+		foo(context.Background()) // want `function must inherit the context from the parent`
+	}()
+}
+
 func foo(ctx context.Context) error {
 	return ctx.Err()
 }
