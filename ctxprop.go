@@ -136,10 +136,15 @@ func (e *engine) checkInstruction(scopeFn *ssa.Function, candidates []parentCand
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
-		if anyInherits(candidates, arg, visited) {
-			continue
+
+		switch anyInherits(candidates, arg, visited) {
+		case fullInheritance:
+			// no diagnostic needed since it inherits the parent context.
+		case partialInheritance:
+			e.reportAmbiguousInheritance(instr, i)
+		case noInheritance:
+			e.reportInappropriateInheritance(scopeFn, candidates, instr, i)
 		}
-		e.reportInappropriateInheritance(scopeFn, candidates, instr, i)
 	}
 }
 
@@ -154,7 +159,7 @@ func (e *engine) reportInappropriateInheritance(scopeFn *ssa.Function, candidate
 	}
 
 	var fixes []analysis.SuggestedFix
-	if startPos != token.NoPos && endPos != token.NoPos && !suggestion.IsAmbiguous {
+	if startPos != token.NoPos && endPos != token.NoPos {
 		fixes = append(fixes, analysis.SuggestedFix{
 			Message: "Replace the context reference by the nearest parent context reference",
 			TextEdits: []analysis.TextEdit{{
@@ -170,6 +175,16 @@ func (e *engine) reportInappropriateInheritance(scopeFn *ssa.Function, candidate
 		End:            endPos,
 		Message:        fmt.Sprintf("function call must inherit the context from the parent; use %s instead.", suggestion.Name),
 		SuggestedFixes: fixes,
+	})
+}
+
+func (e *engine) reportAmbiguousInheritance(instr ssa.Instruction, argIdx int) {
+	startPos, endPos := e.exprPosition(instr, argIdx)
+
+	e.pass.Report(analysis.Diagnostic{
+		Pos:     startPos,
+		End:     endPos,
+		Message: "function call may not inherit the parent context on certain conditions, inheritance is ambiguous.",
 	})
 }
 
@@ -200,13 +215,13 @@ func dropCallReceiver(call *ssa.Call) []ssa.Value {
 	return args[1:]
 }
 
-func anyInherits(candidates []parentCandidate, v ssa.Value, visited []ssa.Value) bool {
+func anyInherits(candidates []parentCandidate, v ssa.Value, visited []ssa.Value) inheritance {
 	for _, candidate := range candidates {
-		if candidate.Inherits(v, visited) {
-			return true
+		if h := candidate.Inherits(v, visited); h != noInheritance {
+			return h
 		}
 	}
-	return false
+	return noInheritance
 }
 
 func (e *engine) collectCandidates(fn *ssa.Function, out []parentCandidate) ([]parentCandidate, *ssa.Function) {
@@ -257,23 +272,25 @@ func (c *parentCandidate) ReplacementName() string {
 	return c.obj.Name()
 }
 
-func (c *parentCandidate) Inherits(value ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) Inherits(value ssa.Value, visited []ssa.Value) inheritance {
 	if c.kind == candidateProvider {
 		return c.inheritsProvider(value, visited)
 	}
 	return c.inheritsVariable(value, visited)
 }
 
-func (c *parentCandidate) inheritsVariable(value ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) inheritsVariable(value ssa.Value, visited []ssa.Value) inheritance {
 	if slices.Contains(visited, value) {
 		// When infinite recursivity is detected, we consider this branch to be ok.
-		return true
+		return fullInheritance
 	}
 	visited = append(visited, value)
 
 	switch a := value.(type) {
 	case *ssa.Parameter:
-		return areIdenticalVariable(a.Object(), c.obj)
+		if areIdenticalVariable(a.Object(), c.obj) {
+			return fullInheritance
+		}
 
 	case *ssa.FreeVar:
 		if binding := freeVarBinding(a); binding != nil {
@@ -305,20 +322,13 @@ func (c *parentCandidate) inheritsVariable(value ssa.Value, visited []ssa.Value)
 
 	case *ssa.Call:
 		for _, arg := range a.Call.Args {
-			if c.inheritsVariable(arg, visited) {
-				return true
+			if h := c.inheritsVariable(arg, visited); h != noInheritance {
+				return h
 			}
 		}
 
 	case *ssa.Phi:
-		// Since a PHI node indicates represents a potential value, we need to check that
-		// all edges will inherit. We however need to make sure to stop when an object
-		// has already been verified.
-		match := true
-		for _, edge := range a.Edges {
-			match = match && c.inheritsVariable(edge, visited)
-		}
-		return match
+		return checkValuesInheritance(a.Edges, visited, c.inheritsVariable)
 
 	case *ssa.Alloc:
 		return c.matchStoredValues(a, visited)
@@ -326,25 +336,18 @@ func (c *parentCandidate) inheritsVariable(value ssa.Value, visited []ssa.Value)
 	case *ssa.MakeMap:
 		return c.matchStoredValues(a, visited)
 	}
-	return false
+	return noInheritance
 }
 
-func (c *parentCandidate) matchStoredValues(addr ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) matchStoredValues(addr ssa.Value, visited []ssa.Value) inheritance {
 	values := c.e.collectStoredCtxValues(addr)
-	if len(values) == 0 {
-		return false
-	}
-	match := true
-	for _, v := range values {
-		match = match && c.inheritsVariable(v, visited)
-	}
-	return match
+	return checkValuesInheritance(values, visited, c.inheritsVariable)
 }
 
-func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value) bool {
+func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value) inheritance {
 	if slices.Contains(visited, value) {
 		// Prevent an infinite recursion.
-		return true
+		return fullInheritance
 	}
 	visited = append(visited, value)
 
@@ -352,11 +355,11 @@ func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value)
 	case *ssa.Call:
 		if c.isProvidingContext(a.Call, visited) {
 			// This is the call to the provider returning the parent context.
-			return true
+			return fullInheritance
 		}
 		for _, v := range a.Call.Args {
-			if c.inheritsProvider(v, visited) {
-				return true
+			if h := c.inheritsProvider(v, visited); h != noInheritance {
+				return h
 			}
 		}
 
@@ -364,18 +367,27 @@ func (c *parentCandidate) inheritsProvider(value ssa.Value, visited []ssa.Value)
 		return c.inheritsProvider(a.X, visited)
 	case *ssa.Extract:
 		return c.inheritsProvider(a.Tuple, visited)
-
 	case *ssa.Phi:
-		// All incoming edges must trace back to the provider; otherwise
-		// some control-flow path produces a context that was not derived
-		// from it.
-		match := true
-		for _, edge := range a.Edges {
-			match = match && c.inheritsProvider(edge, visited)
-		}
-		return match
+		return checkValuesInheritance(a.Edges, visited, c.inheritsProvider)
 	}
-	return false
+	return noInheritance
+}
+
+func checkValuesInheritance(values, visited []ssa.Value, checker func(ssa.Value, []ssa.Value) inheritance) (res inheritance) {
+	for i, value := range values {
+		edgeInheritance := checker(value, visited)
+		switch {
+		case res == noInheritance && i > 0 && edgeInheritance != noInheritance:
+			return partialInheritance
+
+		case res == noInheritance:
+			res = edgeInheritance
+
+		case res == fullInheritance && edgeInheritance != fullInheritance:
+			return partialInheritance
+		}
+	}
+	return res
 }
 
 func (c *parentCandidate) isProvidingContext(call ssa.CallCommon, visited []ssa.Value) bool {
@@ -500,3 +512,11 @@ func fromReferrers(referrers *[]ssa.Instruction) []ssa.Instruction {
 	}
 	return nil
 }
+
+type inheritance int
+
+const (
+	noInheritance inheritance = iota
+	partialInheritance
+	fullInheritance
+)

@@ -44,7 +44,6 @@ func (s suggestions) Find() (suggestion Suggestion, ok bool) {
 		}
 		return true
 	})
-
 	return
 }
 
@@ -79,7 +78,7 @@ func (s suggestions) tryFindSuggestion(assign *ast.AssignStmt) (string, bool) {
 
 func (s suggestions) hasValidInheritance(assign *ast.AssignStmt, idx int, expr ast.Expr) bool {
 	if named := s.findNamedContextAt(expr.Pos()); named != nil {
-		return anyInherits(s.candidates, named, nil)
+		return anyInherits(s.candidates, named, nil) == fullInheritance
 	}
 
 	if len(assign.Rhs) != 1 {
@@ -96,7 +95,7 @@ func (s suggestions) hasValidInheritance(assign *ast.AssignStmt, idx int, expr a
 		}
 		exprType = tuple.At(idx).Type()
 	}
-	return s.engine.isContextImpl(exprType) && anyInherits(s.candidates, val, nil)
+	return s.engine.isContextImpl(exprType) && anyInherits(s.candidates, val, nil) == fullInheritance
 }
 
 func (s suggestions) findNamedContextAt(pos token.Pos) ssa.Value {
@@ -155,6 +154,5 @@ func extractIdent(e ast.Expr) (string, bool) {
 }
 
 type Suggestion struct {
-	Name        string
-	IsAmbiguous bool
+	Name string
 }

@@ -203,3 +203,27 @@ func _(ctx context.Context) error {
 	}()
 	return nil
 }
+
+func _(ctx context.Context, n int) error {
+	named := ctx
+	for i := 0; i < n; i++ {
+		named = Wrap(named).Context
+	}
+	_ = bar(context.Background()) // want `function call must inherit the context from the parent; use named instead\.`
+	return nil
+}
+
+func _(ctx context.Context) error {
+	named := (Wrap(ctx))
+	_ = named
+	_ = bar(context.Background()) // want `function call must inherit the context from the parent; use named instead\.`
+	return nil
+}
+
+func _(ctx context.Context) error {
+	a, b := ctx, ctx
+	_ = a
+	_ = b
+	_ = bar(context.Background()) // want `function call must inherit the context from the parent; use ctx instead\.`
+	return nil
+}
