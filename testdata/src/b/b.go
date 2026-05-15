@@ -8,14 +8,14 @@ import (
 func _() {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		foo(r.Context())
-		foo(context.Background()) // want `function must inherit the context from the parent`
+		foo(context.Background()) // want `function call must inherit the context from the parent; use r\.Context\(\) instead\.`
 	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 
 		foo(ctx)
-		foo(context.Background()) // want `function must inherit the context from the parent`
+		foo(context.Background()) // want `function call must inherit the context from the parent; use ctx instead\.`
 	})
 }
 
@@ -23,14 +23,14 @@ func _(ctx context.Context) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Here we expect the context from the request.
 		foo(r.Context())
-		foo(ctx) // want `function must inherit the context from the parent`
+		foo(ctx) // want `function call must inherit the context from the parent; use r\.Context\(\) instead\.`
 	})
 }
 
 func _(r *http.Request) {
 	func() {
 		foo(r.Context())
-		foo(context.Background()) // want `function must inherit the context from the parent`
+		foo(context.Background()) // want `function call must inherit the context from the parent; use r\.Context\(\) instead\.`
 	}()
 }
 
@@ -50,7 +50,17 @@ func _(h http.Handler) http.Handler {
 		if r.Header.Get("Reset") != "" {
 			ctx = context.Background()
 		}
-		h.ServeHTTP(w, r.WithContext(ctx)) // want `function must inherit the context from the parent`
+		h.ServeHTTP(w, r.WithContext(ctx)) // want `function call may not inherit the parent context on certain conditions, inheritance is ambiguous\.`
+	})
+}
+
+func _(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.Background()
+		if r.Header.Get("UseReq") != "" {
+			ctx = r.Context()
+		}
+		h.ServeHTTP(w, r.WithContext(ctx)) // want `function call may not inherit the parent context on certain conditions, inheritance is ambiguous\.`
 	})
 }
 
@@ -62,6 +72,11 @@ func _(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func _(r *http.Request) error {
+	other := &http.Request{}
+	return foo(other.Context()) // want `function call must inherit the context from the parent; use r\.Context\(\) instead\.`
 }
 
 func foo(ctx context.Context) error {

@@ -7,9 +7,9 @@ type Handler struct {
 }
 
 func (h Handler) Do(ctx context.Context) error {
-	_ = foo(h) // want `function must inherit the context from the parent`
+	_ = foo(h) // want `function call must inherit the context from the parent; use ctx instead\.`
 	_ = h.inner(ctx)
-	_ = h.inner(context.Background()) // want `function must inherit the context from the parent`
+	_ = h.inner(context.Background()) // want `function call must inherit the context from the parent; use ctx instead\.`
 	return foo(ctx)
 }
 
