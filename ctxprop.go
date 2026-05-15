@@ -1,12 +1,15 @@
 package ctxprop
 
 import (
+	"fmt"
+	"go/ast"
 	"go/token"
 	"go/types"
 	"slices"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
+	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ssa"
 )
 
@@ -26,8 +29,8 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	e := engine{
-		ssa:    buildSSA,
-		report: pass.Report,
+		ssa:  buildSSA,
+		pass: pass,
 	}
 
 	e.do()
@@ -51,7 +54,7 @@ type engine struct {
 	ssa              *buildssa.SSA
 	ctxIface         *types.Interface
 	ctxProviderIFace *types.Interface
-	report           func(analysis.Diagnostic)
+	pass             *analysis.Pass
 }
 
 func (e *engine) init() {
@@ -110,40 +113,79 @@ func (e *engine) do() {
 		if fn == nil {
 			continue
 		}
-		candidates = e.collectCandidates(fn, candidates[:0])
+		var scopeFn *ssa.Function
+		candidates, scopeFn = e.collectCandidates(fn, candidates[:0])
 		if len(candidates) == 0 {
 			continue
 		}
 		for _, block := range fn.Blocks {
 			for _, instr := range block.Instrs {
-				e.checkInstruction(candidates, instr, visited)
+				e.checkInstruction(scopeFn, candidates, instr, visited)
 			}
 		}
 	}
 }
 
-func (e *engine) checkInstruction(candidates []parentCandidate, instr ssa.Instruction, visited []ssa.Value) {
+func (e *engine) checkInstruction(scopeFn *ssa.Function, candidates []parentCandidate, instr ssa.Instruction, visited []ssa.Value) {
 	call, ok := instr.(*ssa.Call)
 	if !ok {
 		return
 	}
 
-	for _, arg := range dropCallReceiver(call) {
+	for i, arg := range dropCallReceiver(call) {
 		if !e.isContextImpl(arg.Type()) {
 			continue
 		}
 		if anyInherits(candidates, arg, visited) {
 			continue
 		}
-		e.report(analysis.Diagnostic{
-			Pos:     instr.Pos(),
-			Message: "function must inherit the context from the parent",
-			Related: []analysis.RelatedInformation{{
-				Pos:     instr.Pos(),
-				Message: "Use " + candidates[0].ReplacementName() + " instead",
+		e.reportInappropriateInheritance(scopeFn, candidates, instr, i)
+	}
+}
+
+func (e *engine) reportInappropriateInheritance(scopeFn *ssa.Function, candidates []parentCandidate, instr ssa.Instruction, argIdx int) {
+	startPos, endPos := e.exprPosition(instr, argIdx)
+
+	// First try to find a local replacement which would have superseded the argument
+	// of the function.
+	suggestion, ok := suggestions{scope: scopeFn, engine: e, candidates: candidates, instr: instr}.Find()
+	if !ok {
+		suggestion = Suggestion{Name: candidates[0].ReplacementName()}
+	}
+
+	var fixes []analysis.SuggestedFix
+	if startPos != token.NoPos && endPos != token.NoPos && !suggestion.IsAmbiguous {
+		fixes = append(fixes, analysis.SuggestedFix{
+			Message: "Replace the context reference by the nearest parent context reference",
+			TextEdits: []analysis.TextEdit{{
+				Pos:     startPos,
+				End:     endPos,
+				NewText: []byte(suggestion.Name),
 			}},
 		})
 	}
+
+	e.pass.Report(analysis.Diagnostic{
+		Pos:            startPos,
+		End:            endPos,
+		Message:        fmt.Sprintf("function call must inherit the context from the parent; use %s instead.", suggestion.Name),
+		SuggestedFixes: fixes,
+	})
+}
+
+func (e *engine) exprPosition(instr ssa.Instruction, argIdx int) (start, end token.Pos) {
+	for _, f := range e.pass.Files {
+		if instr.Pos() < f.FileStart || instr.Pos() > f.FileEnd {
+			continue
+		}
+		path, _ := astutil.PathEnclosingInterval(f, instr.Pos(), instr.Pos())
+		for _, node := range path {
+			if call, ok := node.(*ast.CallExpr); ok && argIdx < len(call.Args) {
+				return call.Args[argIdx].Pos(), call.Args[argIdx].End()
+			}
+		}
+	}
+	return token.NoPos, token.NoPos
 }
 
 func dropCallReceiver(call *ssa.Call) []ssa.Value {
@@ -167,7 +209,7 @@ func anyInherits(candidates []parentCandidate, v ssa.Value, visited []ssa.Value)
 	return false
 }
 
-func (e *engine) collectCandidates(fn *ssa.Function, out []parentCandidate) []parentCandidate {
+func (e *engine) collectCandidates(fn *ssa.Function, out []parentCandidate) ([]parentCandidate, *ssa.Function) {
 	for f := fn; f != nil; f = f.Parent() {
 		for _, p := range dropFuncReceiver(f) {
 			switch {
@@ -182,10 +224,10 @@ func (e *engine) collectCandidates(fn *ssa.Function, out []parentCandidate) []pa
 		// since we want to privilege the nearest parent contexts (e.g. a closure taking
 		// a context as parameter).
 		if len(out) > 0 {
-			return out
+			return out, f
 		}
 	}
-	return out
+	return out, nil
 }
 
 func dropFuncReceiver(fn *ssa.Function) []*ssa.Parameter {
@@ -206,10 +248,6 @@ type parentCandidate struct {
 	kind candidateKind
 	obj  types.Object
 	e    *engine
-}
-
-func (c *parentCandidate) Pos() token.Pos {
-	return c.obj.Pos()
 }
 
 func (c *parentCandidate) ReplacementName() string {
