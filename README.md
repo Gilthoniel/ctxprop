@@ -28,6 +28,34 @@ It can be invoked as a single linter but it is recommended to run it through gol
 ctxprop [-flag] [package]
 ```
 
+## Plugin
+
+The linter can be injected into `golangci-lint` as a plugin, see
+the [doc](https://golangci-lint.run/docs/plugins/module-plugins/) for more details:
+
+```yaml
+# .custom-gcl.yml
+
+version: ${GOLANGCI_LINT_VERSION}
+plugins:
+  - module: 'github.com/Gilthoniel/ctxprop'
+    import: 'github.com/Gilthoniel/ctxprop/plugin'
+    version: ${VERSION}
+```
+
+```yaml
+# .golangci.yml
+
+linters:
+  enable:
+    - ctxprop
+  settings:
+    custom:
+      ctxprop:
+        type: "module"
+        description: context propagation checker as a custom plugin.
+```
+
 ## What it checks
 
 `ctxprop` reports calls that pass a `context.Context` that is **not derived from
