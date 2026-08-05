@@ -116,3 +116,10 @@ func handle(ctx context.Context) {
     _ = work(mc.Context) // ok
 }
 ```
+
+## Usage of AI
+
+It is generally allowed to use AI in this project, however:
+- A thorough review by the creator of the PR must be performed. Low quality PR will be closed.
+- Coverage must be above 80%.
+- Comments must be meaningful and bring a value.
