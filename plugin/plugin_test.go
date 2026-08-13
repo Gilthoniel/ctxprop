@@ -12,7 +12,7 @@ import (
 func Test(t *testing.T) {
 	p, err := plugin.New(nil)
 	require.NoError(t, err)
-	require.Equal(t, register.LoadModeSyntax, p.GetLoadMode())
+	require.Equal(t, register.LoadModeTypesInfo, p.GetLoadMode())
 
 	analyzers, err := p.BuildAnalyzers()
 	require.NoError(t, err)
